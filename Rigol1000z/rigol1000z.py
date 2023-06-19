@@ -1,7 +1,7 @@
 import os
 import numpy as _np
 import tqdm as _tqdm
-import visa as _visa
+#import visa as _visa
 
 class _Rigol1000zChannel:
     '''
@@ -25,7 +25,11 @@ class _Rigol1000zChannel:
 
     def get_voltage_rms_V(self):
         assert 1 <= self._channel <= 4, 'Invalid channel.'
-        return self._osc.ask(':MEAS:ITEM? VRMS,CHAN%i' % self._channel)
+        return self._osc.visa_ask(':MEAS:ITEM? VRMS,CHAN%i' % self._channel)
+    
+    def get_voltage_Vpp(self):
+        assert 1 <= self._channel <= 4, 'Invalid channel.'
+        return self._osc.visa_ask(':MEAS:ITEM? VPP,CHAN%i' % self._channel)
 
     def select_channel(self):
         self._osc.write(':MEAS:SOUR CHAN%i' % self._channel)
@@ -41,11 +45,11 @@ class _Rigol1000zChannel:
         return self.get_coupling()
 
     def enable(self):
-        self.visa_write(':disp 1' % self._channel)
+        self.visa_write(f'chan{self._channel}:disp 1')
         return self.enabled()
 
     def disable(self):
-        self.visa_write(':disp 0' % self._channel)
+        self.visa_write(f'chan{self._channel}:disp 0')
         return self.disabled()
 
     def enabled(self):
@@ -55,7 +59,7 @@ class _Rigol1000zChannel:
         return bool(int(self.visa_ask(':disp?'))) ^ 1
 
     def get_offset_V(self):
-        return float(self.visa_ask(':off?'))
+        return float(self.visa_ask(':offs?'))
 
     def set_offset_V(self, offset):
         assert -1000 <= offset <= 1000.
@@ -100,16 +104,16 @@ class _Rigol1000zChannel:
         '''
         pre = self._osc.visa_ask(':wav:pre?').split(',')
         pre_dict = {
-            'format': int(pre[0]),
-            'type': int(pre[1]),
-            'points': int(pre[2]),
-            'count': int(pre[3]),
-            'xincrement': float(pre[4]),
-            'xorigin': float(pre[5]),
-            'xreference': float(pre[6]),
-            'yincrement': float(pre[7]),
-            'yorigin': float(pre[8]),
-            'yreference': float(pre[9]),
+            f'chan{self._channel} format': int(pre[0]),
+            f'chan{self._channel} type': int(pre[1]),
+            f'chan{self._channel} points': int(pre[2]),
+            f'chan{self._channel} count': int(pre[3]),
+            f'chan{self._channel} xincrement': float(pre[4]),
+            f'chan{self._channel} xorigin': float(pre[5]),
+            f'chan{self._channel} xreference': float(pre[6]),
+            f'chan{self._channel} yincrement': float(pre[7]),
+            f'chan{self._channel} yorigin': float(pre[8]),
+            f'chan{self._channel} yreference': float(pre[9]),
         }
         return pre_dict
 
@@ -129,19 +133,20 @@ class _Rigol1000zChannel:
                 and the second list is the voltage values.
 
         '''
-        assert mode in ('norm', 'raw')
+        assert mode in ('norm', 'raw','max')
 
         # Setup scope
         self._osc.visa_write(':stop')
         self._osc.visa_write(':wav:sour chan%i' % self._channel)
         self._osc.visa_write(':wav:mode %s' % mode)
-        self._osc.visa_write(':wav:form byte')
+        self._osc.visa_write(':wav:form byte') #changed byte to ascii
 
         info = self.get_data_premable()
+        print(info)
 
         max_num_pts = 250000
-        num_blocks = info['points'] // max_num_pts
-        last_block_pts = info['points'] % max_num_pts
+        num_blocks = info[f'chan{self._channel} points'] // max_num_pts
+        last_block_pts = info[f'chan{self._channel} points'] % max_num_pts
 
         datas = []
         for i in _tqdm.tqdm(range(num_blocks+1), ncols=60):
@@ -154,14 +159,20 @@ class _Rigol1000zChannel:
                     self._osc.visa_write(':wav:stop %i' % (num_blocks*250000+last_block_pts))
                 else:
                     break
-            data = self._osc.visa_ask_raw(':wav:data?')[11:]
+            data = self._osc.visa_ask_raw(':wav:data?')[11:] #commented out _raw
+            # print(data[-1])
+            data = data[:-1] #STS had to do this to remove dropouts once per read
+            #also seems to remove the need for cropping data to match length
             data = _np.frombuffer(data, 'B')
+            #print(len(data))
             datas.append(data)
 
         datas = _np.concatenate(datas)
-        v = (datas - info['yorigin'] - info['yreference']) * info['yincrement']
+    
+        v = (datas - info[f'chan{self._channel} yorigin'] - info[f'chan{self._channel} yreference']) * info[f'chan{self._channel} yincrement']
 
-        t = _np.arange(0, info['points']*info['xincrement'], info['xincrement'])
+        t = _np.arange(0, info[f'chan{self._channel} points']*info[f'chan{self._channel} xincrement'], info[f'chan{self._channel} xincrement'])
+        t = t + info[f'chan{self._channel} xorigin'] #correct axis?
         # info['xorigin'] + info['xreference']
 
         if filename:
@@ -194,6 +205,15 @@ class _Rigol1000zTrigger:
     def set_trigger_holdoff_s(self, holdoff):
         self._osc.visa_write(':trig:hold %.3e' % holdoff)
         return self.get_trigger_holdoff_s()
+    
+    def trigger_input(self, trigChan=False):
+        if trigChan:
+            assert trigChan in (1,2,3,4), 'trigger input must be ch # 1...4'
+            self._osc.visa_write(f':trig:edg:sour chan{trigChan}')
+        return self._osc.visa_ask(':trig:edg:sour?')
+    
+
+    
 
 class _Rigol1000zTimebase:
     '''
@@ -274,14 +294,14 @@ class Rigol1000z:
         return self.visa_resource.read().strip()
 
     def visa_read_raw(self, num_bytes=-1):
-        return self.visa_resource.read_raw(num_bytes)
+        return self.visa_resource.read_raw()#deleted num_bytes arg
 
     def visa_ask(self, cmd):
         return self.visa_resource.query(cmd)
 
     def visa_ask_raw(self, cmd, num_bytes=-1):
         self.visa_write(cmd)
-        return self.visa_read_raw(num_bytes)
+        return self.visa_read_raw()#deleted num_bytes arg
 
     def autoscale(self):
         self.visa_write(':aut')
@@ -330,10 +350,10 @@ class Rigol1000z:
 
     def get_mode(self):
         modes = {
-            'NORM': 'normal',
-            'AVER': 'averages',
-            'PEAK': 'peak',
-            'HRES': 'high_resolution'
+            'NORM\n': 'normal',
+            'AVER\n': 'averages',
+            'PEAK\n': 'peak',
+            'HRES\n': 'high_resolution'
         }
         return modes[self.visa_ask(':acq:type?')]
 
